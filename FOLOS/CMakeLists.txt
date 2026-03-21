@@ -27,3 +27,5 @@ target_link_libraries(webhook_listener PRIVATE
     HSTL::HSTL 
     httplib::httplib
 )
+
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/public DESTINATION ${CMAKE_BINARY_DIR}/bin)

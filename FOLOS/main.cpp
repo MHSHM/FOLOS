@@ -11,198 +11,12 @@
 
 using namespace hstl;
 
-const char* DASHBOARD_HTML = R"HTML(
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Transaction Dashboard</title>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f4f4f9; padding: 20px; color: #333; }
-        .header-container { max-width: 1200px; margin: 0 auto; display: flex; justify-content: space-between; align-items: center; }
-        h1 { color: #2c3e50; }
-        table { width: 100%; max-width: 1200px; margin: 20px auto; border-collapse: collapse; background: white; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-        th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #ddd; }
-        th { background-color: #2c3e50; color: white; text-transform: uppercase; font-size: 14px; }
-        tr:hover { background-color: #f9f9f9; }
-        
-        .month-header { background-color: #ecf0f1 !important; border-top: 2px solid #bdc3c7; }
-        .month-title { font-weight: bold; color: #2c3e50; font-size: 16px; }
-        .month-total { font-weight: bold; color: #e67e22; font-size: 15px; text-align: right; }
-        
-        .amount { font-weight: bold; color: #27ae60; }
-        .note-text { font-size: 13px; color: #555; font-style: italic; }
-        button { cursor: pointer; border: none; border-radius: 4px; padding: 6px 12px; font-weight: bold; transition: background 0.2s; }
-        
-        .btn-edit { background: #3498db; color: white; font-size: 10px; padding: 4px 8px; margin-left: 8px; }
-        .btn-edit:hover { background: #2980b9; }
-        .btn-delete { background: #e74c3c; color: white; font-size: 12px; }
-        .btn-delete:hover { background: #c0392b; }
-        .btn-clear { background: #c0392b; color: white; padding: 10px 15px; }
-        .btn-clear:hover { background: #962d22; }
-    </style>
-</head>
-<body>
-    <div class="header-container">
-        <h1>Transaction Dashboard</h1>
-        <button class="btn-clear" onclick="clearAllTransactions()">Clear All</button>
-    </div>
-    
-    <table>
-        <thead>
-            <tr>
-                <th>ID</th>
-                <th>Date</th>
-                <th>Merchant</th>
-                <th>Amount</th>
-                <th>Notes</th>
-                <th>System Log Time</th>
-                <th>Actions</th>
-            </tr>
-        </thead>
-        <tbody id="tx-table-body">
-            <tr><td colspan="7" style="text-align: center;">Loading...</td></tr>
-        </tbody>
-    </table>
-
-    <script>
-        async function loadTransactions() {
-            try {
-                const response = await fetch('/api/transactions');
-                const data = await response.json();
-                const tbody = document.getElementById('tx-table-body');
-                tbody.innerHTML = '';
-
-                if (data.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="7" style="text-align: center;">No transactions found.</td></tr>';
-                    return;
-                }
-
-                const grouped = {};
-                data.forEach(tx => {
-                    const month = (tx.date && tx.date !== "Unknown") ? tx.date.substring(0, 7) : "Unknown"; 
-                    
-                    if (!grouped[month]) {
-                        grouped[month] = { transactions: [], totals: {} };
-                    }
-                    grouped[month].transactions.push(tx);
-                    
-                    if (!grouped[month].totals[tx.currency]) {
-                        grouped[month].totals[tx.currency] = 0;
-                    }
-                    grouped[month].totals[tx.currency] += Number(tx.amount);
-                });
-
-                const sortedMonths = Object.keys(grouped).sort((a, b) => {
-                    if (a === "Unknown") return 1;
-                    if (b === "Unknown") return -1;
-                    return b.localeCompare(a);
-                });
-
-                sortedMonths.forEach(month => {
-                    const group = grouped[month];
-                    
-                    let monthName = "⚠️ Unknown Date";
-                    if (month !== "Unknown") {
-                        const dateObj = new Date(month + "-01");
-                        monthName = "📅 " + dateObj.toLocaleString('default', { month: 'long', year: 'numeric' });
-                    }
-
-                    const totalStr = Object.entries(group.totals)
-                        .map(([currency, amount]) => `${amount.toFixed(2)} ${currency}`)
-                        .join(' + ');
-
-                    const headerRow = document.createElement('tr');
-                    headerRow.className = 'month-header';
-                    headerRow.innerHTML = `
-                        <td colspan="3" class="month-title">${monthName}</td>
-                        <td colspan="4" class="month-total">Total: ${totalStr}</td>
-                    `;
-                    tbody.appendChild(headerRow);
-
-                    group.transactions.forEach(tx => {
-                        const safeNote = tx.notes ? tx.notes.replace(/'/g, "\\'").replace(/"/g, "&quot;") : '';
-                        const displayNote = tx.notes || '-';
-                        
-                        const row = document.createElement('tr');
-                        row.innerHTML = `
-                            <td>#${tx.id}</td>
-                            <td>${tx.date}</td>
-                            <td>${tx.merchant}</td>
-                            <td class="amount">${Number(tx.amount).toFixed(2)} ${tx.currency}</td>
-                            <td>
-                                <span class="note-text">${displayNote}</span>
-                                <button class="btn-edit" onclick="editNote(${tx.id}, '${safeNote}')">Edit</button>
-                            </td>
-                            <td style="color:#7f8c8d; font-size:12px;">${tx.created_at}</td>
-                            <td>
-                                <button class="btn-delete" onclick="deleteTransaction(${tx.id})">Delete</button>
-                            </td>
-                        `;
-                        tbody.appendChild(row);
-                    });
-                });
-            } catch (err) {
-                console.error('Failed to fetch transactions', err);
-                const tbody = document.getElementById('tx-table-body');
-                tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: red;">Error loading transactions.</td></tr>';
-            }
-        }
-
-        async function editNote(id, currentNote) {
-            const newNote = prompt(`Enter note for transaction #${id}:`, currentNote);
-            if (newNote === null) return; 
-            
-            try {
-                const response = await fetch(`/api/transactions/${id}/note`, { 
-                    method: 'PUT',
-                    body: newNote 
-                });
-                if (response.ok) {
-                    loadTransactions(); 
-                } else {
-                    alert('Failed to update note.');
-                }
-            } catch (err) {
-                console.error(err);
-                alert('An error occurred while saving the note.');
-            }
-        }
-
-        async function deleteTransaction(id) {
-            if (!confirm(`Are you sure you want to delete transaction #${id}?`)) return;
-            try {
-                const response = await fetch(`/api/transactions/${id}`, { method: 'DELETE' });
-                if (response.ok) loadTransactions(); 
-                else alert('Failed to delete transaction.');
-            } catch (err) {
-                alert('An error occurred while deleting.');
-            }
-        }
-
-        async function clearAllTransactions() {
-            if (!confirm('WARNING: Are you sure you want to delete ALL transactions?')) return;
-            try {
-                const response = await fetch('/api/transactions', { method: 'DELETE' });
-                if (response.ok) loadTransactions(); 
-                else alert('Failed to clear database.');
-            } catch (err) {
-                alert('An error occurred while clearing.');
-            }
-        }
-        
-        loadTransactions();
-    </script>
-</body>
-</html>
-)HTML";
-
 struct TransactionRecord {
 	long amount{ 0 };
 	hstl::Str currency;
 	hstl::Str merchant;
 	hstl::Str date;
+	hstl::Str category;
 	hstl::Str notes;
 	hstl::Str raw_sms;
 };
@@ -222,6 +36,7 @@ hstl::Result<sqlite3*> init_database(const char* db_name) {
 		"date TEXT,"
 		"notes TEXT DEFAULT '',"
 		"raw_sms TEXT DEFAULT '',"
+		"category TEXT DEFAULT 'Others',"
 		"created_at DATETIME DEFAULT CURRENT_TIMESTAMP);";
 
 	char* err_msg = nullptr;
@@ -232,11 +47,15 @@ hstl::Result<sqlite3*> init_database(const char* db_name) {
 		return err;
 	}
 
+	// Attempt to migrate existing databases to include the new column
+	// This will naturally fail if the column already exists, which is safe to ignore.
+	sqlite3_exec(db, "ALTER TABLE transactions ADD COLUMN category TEXT DEFAULT 'Others';", nullptr, nullptr, nullptr);
+
 	return db;
 }
 
 hstl::Result<bool> save_transaction(sqlite3* db, const TransactionRecord& record) {
-	const char* insert_sql = "INSERT INTO transactions (amount, currency, merchant, date, notes, raw_sms) VALUES (?, ?, ?, ?, ?, ?);";
+	const char* insert_sql = "INSERT INTO transactions (amount, currency, merchant, date, category, notes, raw_sms) VALUES (?, ?, ?, ?, ?, ?, ?);";
 	sqlite3_stmt* stmt;
 
 	if (sqlite3_prepare_v2(db, insert_sql, -1, &stmt, nullptr) != SQLITE_OK) {
@@ -254,11 +73,14 @@ hstl::Result<bool> save_transaction(sqlite3* db, const TransactionRecord& record
 	hstl::Str_View date_v = record.date.view();
 	sqlite3_bind_text(stmt, 4, date_v.data(), (int)date_v.count(), SQLITE_TRANSIENT);
 
+	hstl::Str_View category_v = record.category.view();
+	sqlite3_bind_text(stmt, 5, category_v.data(), (int)category_v.count(), SQLITE_TRANSIENT);
+
 	hstl::Str_View notes_v = record.notes.view();
-	sqlite3_bind_text(stmt, 5, notes_v.data(), (int)notes_v.count(), SQLITE_TRANSIENT);
+	sqlite3_bind_text(stmt, 6, notes_v.data(), (int)notes_v.count(), SQLITE_TRANSIENT);
 
 	hstl::Str_View raw_sms_v = record.raw_sms.view();
-	sqlite3_bind_text(stmt, 6, raw_sms_v.data(), (int)raw_sms_v.count(), SQLITE_TRANSIENT);
+	sqlite3_bind_text(stmt, 7, raw_sms_v.data(), (int)raw_sms_v.count(), SQLITE_TRANSIENT);
 
 	if (sqlite3_step(stmt) != SQLITE_DONE) {
 		hstl::Err err("Failed to execute statement: {}", sqlite3_errmsg(db));
@@ -300,8 +122,7 @@ void normalize_date(hstl::Str& date_str) {
 	date_str.push_range(formatted.c_str(), formatted.count());
 }
 
-hstl::Str_View extract_json_value(hstl::Str_View payload, const char* key)
-{
+hstl::Str_View extract_json_value(hstl::Str_View payload, const char* key) {
 	char search_key[32];
 	std::snprintf(search_key, sizeof(search_key), "\"%s\"", key);
 
@@ -323,7 +144,6 @@ hstl::Str_View extract_json_value(hstl::Str_View payload, const char* key)
 	return value_area.substr(0, end_quote);
 }
 
-// Simple helper to prevent dashboard JSON from breaking if quotes/newlines are in the DB text
 hstl::Str escape_json_string(const char* input) {
 	hstl::Str out;
 	if (!input) return out;
@@ -344,7 +164,7 @@ hstl::Str get_transactions_json(sqlite3* db) {
 	hstl::Str json;
 	json.push('[');
 
-	const char* query = "SELECT id, amount, currency, merchant, date, created_at, notes FROM transactions ORDER BY created_at DESC;";
+	const char* query = "SELECT id, amount, currency, merchant, date, created_at, notes, category FROM transactions ORDER BY created_at DESC;";
 	sqlite3_stmt* stmt;
 
 	if (sqlite3_prepare_v2(db, query, -1, &stmt, nullptr) == SQLITE_OK) {
@@ -362,12 +182,14 @@ hstl::Str get_transactions_json(sqlite3* db) {
 			const char* date = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
 			const char* created_at = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
 			const char* raw_notes = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 6));
+			const char* raw_category = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 7));
 
 			hstl::Str escaped_notes = escape_json_string(raw_notes);
+			hstl::Str escaped_category = escape_json_string(raw_category ? raw_category : "Others");
 
 			hstl::fmt(json,
-				R"({"id":{},"amount":{},"currency":"{}","merchant":"{}","date":"{}","created_at":"{}","notes":"{}"})",
-				id, amount, currency, merchant, date, created_at, escaped_notes.view()
+				R"({"id":{},"amount":{},"currency":"{}","merchant":"{}","date":"{}","created_at":"{}","notes":"{}","category":"{}"})",
+				id, amount, currency, merchant, date, created_at, escaped_notes.view(), escaped_category.view()
 			);
 		}
 	}
@@ -410,8 +232,7 @@ hstl::Result<bool> clear_transactions(sqlite3* db) {
 	return true;
 }
 
-bool is_arabic_message(hstl::Str_View sms)
-{
+bool is_arabic_message(hstl::Str_View sms) {
 	if (sms.find("خصم") != hstl::Str_View::npos) return true;
 	if (sms.find("حساب") != hstl::Str_View::npos) return true;
 	if (sms.find("جم") != hstl::Str_View::npos) return true;
@@ -419,8 +240,7 @@ bool is_arabic_message(hstl::Str_View sms)
 	return false;
 }
 
-bool parse_english_sms(hstl::Str_View sms, TransactionRecord& record)
-{
+bool parse_english_sms(hstl::Str_View sms, TransactionRecord& record) {
 	size_t debited_pos = sms.find("debited by");
 	if (debited_pos == hstl::Str_View::npos) return false;
 
@@ -432,8 +252,7 @@ bool parse_english_sms(hstl::Str_View sms, TransactionRecord& record)
 	size_t amount_start = currency_pos + 3;
 	size_t amount_end = amount_start;
 
-	while (amount_end < sms.count() && ((sms[amount_end] >= '0' && sms[amount_end] <= '9') || sms[amount_end] == '.' || sms[amount_end] == ','))
-	{
+	while (amount_end < sms.count() && ((sms[amount_end] >= '0' && sms[amount_end] <= '9') || sms[amount_end] == '.' || sms[amount_end] == ',')) {
 		amount_end++;
 	}
 
@@ -486,8 +305,7 @@ bool parse_english_sms(hstl::Str_View sms, TransactionRecord& record)
 	return true;
 }
 
-bool parse_arabic_sms(hstl::Str_View sms, TransactionRecord& record)
-{
+bool parse_arabic_sms(hstl::Str_View sms, TransactionRecord& record) {
 	size_t amount_start = hstl::Str_View::npos;
 	for (size_t i = 0; i < sms.count(); ++i) {
 		if (sms[i] >= '0' && sms[i] <= '9') {
@@ -527,7 +345,6 @@ bool parse_arabic_sms(hstl::Str_View sms, TransactionRecord& record)
 	if (currency_start < currency_end) {
 		hstl::Str_View currency_str = sms.substr(currency_start, currency_end - currency_start);
 
-		// Normalize Arabic currency to "EGP" so the dashboard totals match up perfectly
 		if (currency_str.find("جم") != hstl::Str_View::npos || currency_str.find("جنيه") != hstl::Str_View::npos) {
 			record.currency.clear();
 			record.currency.push_range("EGP", 3);
@@ -615,8 +432,7 @@ int main() {
 	httplib::Server svr;
 
 	svr.Post("/webhook", [db](const httplib::Request& req, httplib::Response& res) {
-		if (!req.has_header("Authorization") || req.get_header_value("Authorization") != "Bearer MySecretToken123")
-		{
+		if (!req.has_header("Authorization") || req.get_header_value("Authorization") != "Bearer MySecretToken123") {
 			log_error("Rejected request: Invalid or Missing token.");
 			res.status = 401;
 			return;
@@ -625,14 +441,12 @@ int main() {
 		hstl::Str_View payload(req.body.c_str(), req.body.length());
 		hstl::Str_View raw_sms = extract_json_value(payload, "text");
 
-		if (raw_sms.count() > 0)
-		{
+		if (raw_sms.count() > 0) {
 			TransactionRecord record;
-			// Store the raw payload exactly as it arrived for debugging/safety
 			record.raw_sms.push_range(raw_sms.data(), raw_sms.count());
+			record.category.push_range("Others", 6); // Default assignment
 
 			bool success = false;
-
 			if (is_arabic_message(raw_sms)) {
 				success = parse_arabic_sms(raw_sms, record);
 				if (success) hstl::log_info("Arabic Transaction Recorded:");
@@ -667,7 +481,6 @@ int main() {
 		res.set_content(json_data.c_str(), "application/json");
 		});
 
-	// NEW: PUT endpoint for updating transaction notes
 	svr.Put(R"(/api/transactions/(\d+)/note)", [db](const httplib::Request& req, httplib::Response& res) {
 		int id = std::atoi(req.matches[1].str().c_str());
 		hstl::Str_View new_note(req.body.c_str(), req.body.length());
@@ -694,9 +507,40 @@ int main() {
 		}
 		});
 
+	// New API endpoint to handle inline category updates
+	svr.Put(R"(/api/transactions/(\d+)/category)", [db](const httplib::Request& req, httplib::Response& res) {
+		int id = std::atoi(req.matches[1].str().c_str());
+		hstl::Str_View new_category(req.body.c_str(), req.body.length());
+
+		const char* update_sql = "UPDATE transactions SET category = ? WHERE id = ?;";
+		sqlite3_stmt* stmt;
+
+		if (sqlite3_prepare_v2(db, update_sql, -1, &stmt, nullptr) == SQLITE_OK) {
+			sqlite3_bind_text(stmt, 1, new_category.data(), (int)new_category.count(), SQLITE_TRANSIENT);
+			sqlite3_bind_int(stmt, 2, id);
+
+			if (sqlite3_step(stmt) == SQLITE_DONE) {
+				res.status = 200;
+				res.set_content("OK", "text/plain");
+			}
+			else {
+				hstl::log_error("Category update failed: {}", sqlite3_errmsg(db));
+				res.status = 500;
+			}
+			sqlite3_finalize(stmt);
+		}
+		else {
+			res.status = 500;
+		}
+	});
+
+	auto ret = svr.set_mount_point("/", "./public");
+	if (!ret)
+		hstl::log_error("The specified base directory doesn't exist!");
+
 	svr.Get("/", [](const httplib::Request&, httplib::Response& res) {
-		res.set_content(DASHBOARD_HTML, "text/html");
-		});
+		res.set_redirect("/index.html");
+	});
 
 	svr.Delete(R"(/api/transactions/(\d+))", [db](const httplib::Request& req, httplib::Response& res) {
 		int id = std::atoi(req.matches[1].str().c_str());
@@ -710,7 +554,7 @@ int main() {
 			res.status = 500;
 			res.set_content("Internal Server Error", "text/plain");
 		}
-		});
+	});
 
 	svr.Delete("/api/transactions", [db](const httplib::Request& req, httplib::Response& res) {
 		auto clear_res = clear_transactions(db);
@@ -723,7 +567,7 @@ int main() {
 			res.status = 500;
 			res.set_content("Internal Server Error", "text/plain");
 		}
-		});
+	});
 
 	hstl::log_info("Webhook server starting on http://0.0.0.0:8080...");
 	svr.listen("0.0.0.0", 8080);
