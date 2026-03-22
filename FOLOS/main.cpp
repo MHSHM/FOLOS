@@ -1,96 +1,15 @@
 ﻿#include "httplib.h"
 #include "Log.h"
+#include "Database.h"
 #include "Str.h"
-#include "Result.h"
 #include "Str_Format.h"
 #include "Fixed_Str.h"
-#include "sqlite3.h"
 
 #include <cstdio>
 #include <string>
+#include <ctime>
 
 using namespace hstl;
-
-struct TransactionRecord {
-	long amount{ 0 };
-	hstl::Str currency;
-	hstl::Str merchant;
-	hstl::Str date;
-	hstl::Str category;
-	hstl::Str notes;
-	hstl::Str raw_sms;
-};
-
-hstl::Result<sqlite3*> init_database(const char* db_name) {
-	sqlite3* db = nullptr;
-	if (sqlite3_open(db_name, &db) != SQLITE_OK) {
-		return hstl::Err("Failed to open database: {}", sqlite3_errmsg(db));
-	}
-
-	const char* create_table_sql =
-		"CREATE TABLE IF NOT EXISTS transactions ("
-		"id INTEGER PRIMARY KEY AUTOINCREMENT,"
-		"amount INTEGER,"
-		"currency TEXT,"
-		"merchant TEXT,"
-		"date TEXT,"
-		"notes TEXT DEFAULT '',"
-		"raw_sms TEXT DEFAULT '',"
-		"category TEXT DEFAULT 'Others',"
-		"created_at DATETIME DEFAULT CURRENT_TIMESTAMP);";
-
-	char* err_msg = nullptr;
-	if (sqlite3_exec(db, create_table_sql, nullptr, nullptr, &err_msg) != SQLITE_OK) {
-		hstl::Err err("Failed to create table: {}", (const char*)err_msg);
-		sqlite3_free(err_msg);
-		sqlite3_close(db);
-		return err;
-	}
-
-	// Attempt to migrate existing databases to include the new column
-	// This will naturally fail if the column already exists, which is safe to ignore.
-	sqlite3_exec(db, "ALTER TABLE transactions ADD COLUMN category TEXT DEFAULT 'Others';", nullptr, nullptr, nullptr);
-
-	return db;
-}
-
-hstl::Result<bool> save_transaction(sqlite3* db, const TransactionRecord& record) {
-	const char* insert_sql = "INSERT INTO transactions (amount, currency, merchant, date, category, notes, raw_sms) VALUES (?, ?, ?, ?, ?, ?, ?);";
-	sqlite3_stmt* stmt;
-
-	if (sqlite3_prepare_v2(db, insert_sql, -1, &stmt, nullptr) != SQLITE_OK) {
-		return hstl::Err("Failed to prepare statement: {}", sqlite3_errmsg(db));
-	}
-
-	sqlite3_bind_int64(stmt, 1, record.amount);
-
-	hstl::Str_View currency_v = record.currency.view();
-	sqlite3_bind_text(stmt, 2, currency_v.data(), (int)currency_v.count(), SQLITE_TRANSIENT);
-
-	hstl::Str_View merchant_v = record.merchant.view();
-	sqlite3_bind_text(stmt, 3, merchant_v.data(), (int)merchant_v.count(), SQLITE_TRANSIENT);
-
-	hstl::Str_View date_v = record.date.view();
-	sqlite3_bind_text(stmt, 4, date_v.data(), (int)date_v.count(), SQLITE_TRANSIENT);
-
-	hstl::Str_View category_v = record.category.view();
-	sqlite3_bind_text(stmt, 5, category_v.data(), (int)category_v.count(), SQLITE_TRANSIENT);
-
-	hstl::Str_View notes_v = record.notes.view();
-	sqlite3_bind_text(stmt, 6, notes_v.data(), (int)notes_v.count(), SQLITE_TRANSIENT);
-
-	hstl::Str_View raw_sms_v = record.raw_sms.view();
-	sqlite3_bind_text(stmt, 7, raw_sms_v.data(), (int)raw_sms_v.count(), SQLITE_TRANSIENT);
-
-	if (sqlite3_step(stmt) != SQLITE_DONE) {
-		hstl::Err err("Failed to execute statement: {}", sqlite3_errmsg(db));
-		sqlite3_finalize(stmt);
-		return err;
-	}
-
-	sqlite3_finalize(stmt);
-	return true;
-}
 
 void normalize_date(hstl::Str& date_str) {
 	if (date_str.view().count() != 5 || date_str.view()[2] != '/') {
@@ -144,94 +63,6 @@ hstl::Str_View extract_json_value(hstl::Str_View payload, const char* key) {
 	return value_area.substr(0, end_quote);
 }
 
-hstl::Str escape_json_string(const char* input) {
-	hstl::Str out;
-	if (!input) return out;
-
-	size_t len = std::strlen(input);
-	for (size_t i = 0; i < len; ++i) {
-		if (input[i] == '"') out.push_range("\\\"", 2);
-		else if (input[i] == '\\') out.push_range("\\\\", 2);
-		else if (input[i] == '\n') out.push_range("\\n", 2);
-		else if (input[i] == '\r') out.push_range("\\r", 2);
-		else if (input[i] == '\t') out.push_range("\\t", 2);
-		else out.push(input[i]);
-	}
-	return out;
-}
-
-hstl::Str get_transactions_json(sqlite3* db) {
-	hstl::Str json;
-	json.push('[');
-
-	const char* query = "SELECT id, amount, currency, merchant, date, created_at, notes, category FROM transactions ORDER BY created_at DESC;";
-	sqlite3_stmt* stmt;
-
-	if (sqlite3_prepare_v2(db, query, -1, &stmt, nullptr) == SQLITE_OK) {
-		bool first = true;
-		while (sqlite3_step(stmt) == SQLITE_ROW) {
-			if (!first) {
-				json.push(',');
-			}
-			first = false;
-
-			int id = sqlite3_column_int(stmt, 0);
-			long amount = sqlite3_column_int64(stmt, 1);
-			const char* currency = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
-			const char* merchant = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
-			const char* date = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
-			const char* created_at = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
-			const char* raw_notes = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 6));
-			const char* raw_category = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 7));
-
-			hstl::Str escaped_notes = escape_json_string(raw_notes);
-			hstl::Str escaped_category = escape_json_string(raw_category ? raw_category : "Others");
-
-			hstl::fmt(json,
-				R"({"id":{},"amount":{},"currency":"{}","merchant":"{}","date":"{}","created_at":"{}","notes":"{}","category":"{}"})",
-				id, amount, currency, merchant, date, created_at, escaped_notes.view(), escaped_category.view()
-			);
-		}
-	}
-	else {
-		hstl::log_error("Failed to query transactions: {}", sqlite3_errmsg(db));
-	}
-
-	sqlite3_finalize(stmt);
-	json.push(']');
-	return json;
-}
-
-hstl::Result<bool> delete_transaction(sqlite3* db, int id) {
-	const char* delete_sql = "DELETE FROM transactions WHERE id = ?;";
-	sqlite3_stmt* stmt;
-
-	if (sqlite3_prepare_v2(db, delete_sql, -1, &stmt, nullptr) != SQLITE_OK) {
-		return hstl::Err("Failed to prepare delete statement: {}", sqlite3_errmsg(db));
-	}
-	sqlite3_bind_int(stmt, 1, id);
-
-	if (sqlite3_step(stmt) != SQLITE_DONE) {
-		hstl::Err err("Failed to execute delete statement: {}", sqlite3_errmsg(db));
-		sqlite3_finalize(stmt);
-		return err;
-	}
-
-	sqlite3_finalize(stmt);
-	return true;
-}
-
-hstl::Result<bool> clear_transactions(sqlite3* db) {
-	char* err_msg = nullptr;
-	if (sqlite3_exec(db, "DELETE FROM transactions;", nullptr, nullptr, &err_msg) != SQLITE_OK) {
-		hstl::Err err("Failed to clear transactions: {}", (const char*)err_msg);
-		sqlite3_free(err_msg);
-		return err;
-	}
-	sqlite3_exec(db, "DELETE FROM sqlite_sequence WHERE name='transactions';", nullptr, nullptr, nullptr);
-	return true;
-}
-
 bool is_arabic_message(hstl::Str_View sms) {
 	if (sms.find("خصم") != hstl::Str_View::npos) return true;
 	if (sms.find("حساب") != hstl::Str_View::npos) return true;
@@ -264,12 +95,8 @@ bool parse_english_sms(hstl::Str_View sms, TransactionRecord& record) {
 	}
 
 	if (!clean_amount.empty()) {
-		try {
-			record.amount = std::stol(clean_amount);
-		}
-		catch (...) {
-			return false;
-		}
+		try { record.amount = std::stol(clean_amount); }
+		catch (...) { return false; }
 	}
 
 	size_t slash_pos = hstl::Str_View::npos;
@@ -329,12 +156,8 @@ bool parse_arabic_sms(hstl::Str_View sms, TransactionRecord& record) {
 	}
 	if (clean_amount.empty()) return false;
 
-	try {
-		record.amount = std::stol(clean_amount);
-	}
-	catch (...) {
-		return false;
-	}
+	try { record.amount = std::stol(clean_amount); }
+	catch (...) { return false; }
 
 	size_t currency_start = amount_end;
 	while (currency_start < sms.count() && sms[currency_start] == ' ') currency_start++;
@@ -344,7 +167,6 @@ bool parse_arabic_sms(hstl::Str_View sms, TransactionRecord& record) {
 
 	if (currency_start < currency_end) {
 		hstl::Str_View currency_str = sms.substr(currency_start, currency_end - currency_start);
-
 		if (currency_str.find("جم") != hstl::Str_View::npos || currency_str.find("جنيه") != hstl::Str_View::npos) {
 			record.currency.clear();
 			record.currency.push_range("EGP", 3);
@@ -420,18 +242,25 @@ bool parse_arabic_sms(hstl::Str_View sms, TransactionRecord& record) {
 }
 
 int main() {
-	auto db_res = init_database("transactions.db");
+	Database db("transactions.db");
+	auto db_res = db.init();
 	if (!db_res) {
 		hstl::log_error("Fatal: {}", db_res.get_err().get_message());
 		return 1;
 	}
-
-	sqlite3* db = db_res.get_value();
 	hstl::log_info("Database initialized successfully.");
 
 	httplib::Server svr;
 
-	svr.Post("/webhook", [db](const httplib::Request& req, httplib::Response& res) {
+	auto ret = svr.set_mount_point("/", "./public");
+	if (!ret) {
+		hstl::log_error("The specified base directory doesn't exist!");
+	}
+	svr.Get("/", [](const httplib::Request&, httplib::Response& res) {
+		res.set_redirect("/index.html");
+	});
+
+	svr.Post("/webhook", [&db](const httplib::Request& req, httplib::Response& res) {
 		if (!req.has_header("Authorization") || req.get_header_value("Authorization") != "Bearer MySecretToken123") {
 			log_error("Rejected request: Invalid or Missing token.");
 			res.status = 401;
@@ -444,7 +273,6 @@ int main() {
 		if (raw_sms.count() > 0) {
 			TransactionRecord record;
 			record.raw_sms.push_range(raw_sms.data(), raw_sms.count());
-			record.category.push_range("Others", 6); // Default assignment
 
 			bool success = false;
 			if (is_arabic_message(raw_sms)) {
@@ -463,7 +291,8 @@ int main() {
 				hstl::log_info("   Merchant: {}", record.merchant.view());
 				hstl::log_info("   Date:     {}", record.date.view());
 
-				auto save_res = save_transaction(db, record);
+				// Using our new clean class method!
+				auto save_res = db.save_transaction(record);
 				if (save_res) hstl::log_info("   -> Successfully saved to database.");
 				else hstl::log_error("   -> Failed to save to database: {}", save_res.get_err().get_message());
 			}
@@ -476,75 +305,30 @@ int main() {
 		res.set_content("Processed", "text/plain");
 		});
 
-	svr.Get("/api/transactions", [db](const httplib::Request&, httplib::Response& res) {
-		hstl::Str json_data = get_transactions_json(db);
+	svr.Get("/api/transactions", [&db](const httplib::Request&, httplib::Response& res) {
+		hstl::Str json_data = db.get_transactions_json();
 		res.set_content(json_data.c_str(), "application/json");
-		});
+	});
 
-	svr.Put(R"(/api/transactions/(\d+)/note)", [db](const httplib::Request& req, httplib::Response& res) {
+	svr.Put(R"(/api/transactions/(\d+)/note)", [&db](const httplib::Request& req, httplib::Response& res) {
 		int id = std::atoi(req.matches[1].str().c_str());
 		hstl::Str_View new_note(req.body.c_str(), req.body.length());
 
-		const char* update_sql = "UPDATE transactions SET notes = ? WHERE id = ?;";
-		sqlite3_stmt* stmt;
-
-		if (sqlite3_prepare_v2(db, update_sql, -1, &stmt, nullptr) == SQLITE_OK) {
-			sqlite3_bind_text(stmt, 1, new_note.data(), (int)new_note.count(), SQLITE_TRANSIENT);
-			sqlite3_bind_int(stmt, 2, id);
-
-			if (sqlite3_step(stmt) == SQLITE_DONE) {
-				res.status = 200;
-				res.set_content("OK", "text/plain");
-			}
-			else {
-				hstl::log_error("Note update failed: {}", sqlite3_errmsg(db));
-				res.status = 500;
-			}
-			sqlite3_finalize(stmt);
+		auto update_res = db.update_note(id, new_note);
+		if (update_res) {
+			res.status = 200;
+			res.set_content("OK", "text/plain");
 		}
 		else {
-			res.status = 500;
-		}
-		});
-
-	// New API endpoint to handle inline category updates
-	svr.Put(R"(/api/transactions/(\d+)/category)", [db](const httplib::Request& req, httplib::Response& res) {
-		int id = std::atoi(req.matches[1].str().c_str());
-		hstl::Str_View new_category(req.body.c_str(), req.body.length());
-
-		const char* update_sql = "UPDATE transactions SET category = ? WHERE id = ?;";
-		sqlite3_stmt* stmt;
-
-		if (sqlite3_prepare_v2(db, update_sql, -1, &stmt, nullptr) == SQLITE_OK) {
-			sqlite3_bind_text(stmt, 1, new_category.data(), (int)new_category.count(), SQLITE_TRANSIENT);
-			sqlite3_bind_int(stmt, 2, id);
-
-			if (sqlite3_step(stmt) == SQLITE_DONE) {
-				res.status = 200;
-				res.set_content("OK", "text/plain");
-			}
-			else {
-				hstl::log_error("Category update failed: {}", sqlite3_errmsg(db));
-				res.status = 500;
-			}
-			sqlite3_finalize(stmt);
-		}
-		else {
+			hstl::log_error("Note update failed");
 			res.status = 500;
 		}
 	});
 
-	auto ret = svr.set_mount_point("/", "./public");
-	if (!ret)
-		hstl::log_error("The specified base directory doesn't exist!");
-
-	svr.Get("/", [](const httplib::Request&, httplib::Response& res) {
-		res.set_redirect("/index.html");
-	});
-
-	svr.Delete(R"(/api/transactions/(\d+))", [db](const httplib::Request& req, httplib::Response& res) {
+	svr.Delete(R"(/api/transactions/(\d+))", [&db](const httplib::Request& req, httplib::Response& res) {
 		int id = std::atoi(req.matches[1].str().c_str());
-		auto delete_res = delete_transaction(db, id);
+		auto delete_res = db.delete_transaction(id);
+
 		if (delete_res) {
 			res.status = 200;
 			res.set_content("Deleted", "text/plain");
@@ -556,8 +340,8 @@ int main() {
 		}
 	});
 
-	svr.Delete("/api/transactions", [db](const httplib::Request& req, httplib::Response& res) {
-		auto clear_res = clear_transactions(db);
+	svr.Delete("/api/transactions", [&db](const httplib::Request& req, httplib::Response& res) {
+		auto clear_res = db.clear_transactions();
 		if (clear_res) {
 			res.status = 200;
 			res.set_content("Cleared", "text/plain");
@@ -571,8 +355,6 @@ int main() {
 
 	hstl::log_info("Webhook server starting on http://0.0.0.0:8080...");
 	svr.listen("0.0.0.0", 8080);
-
-	sqlite3_close(db);
 
 	return 0;
 }

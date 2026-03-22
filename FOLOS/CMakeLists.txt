@@ -18,7 +18,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(cpp_httplib)
 
-add_executable(webhook_listener main.cpp sqlite3.c)
+add_executable(webhook_listener main.cpp sqlite3.c Database.cpp)
 
 find_package(Threads REQUIRED)
 
