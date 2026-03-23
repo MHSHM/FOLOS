@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <string>
 #include <ctime>
+#include <cstdlib>
 
 using namespace hstl;
 
@@ -161,8 +162,14 @@ int main() {
 		}
 	});
 
-	hstl::log_info("Webhook server starting on http://0.0.0.0:8080...");
-	svr.listen("0.0.0.0", 8080);
+	const char* env_port = std::getenv("PORT");
+	const char* env_ip = std::getenv("IP");
+	int port = env_port ? std::atoi(env_port) : 8080;
+	hstl::Str_View ip = env_ip ? env_ip : "0.0.0.0";
+
+	// hstl::log_info can handle the view() perfectly
+	hstl::log_info("Webhook server starting on http://{}:{}...", ip, port);
+	svr.listen(ip.data(), port);
 
 	return 0;
 }
